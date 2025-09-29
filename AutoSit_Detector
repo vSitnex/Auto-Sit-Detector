@@ -1,26 +1,21 @@
--- Spy Chat con Burbujas - Versión Mejorada
+-- Spy Chat con Burbujas - Versión Final (acepta prefijos antes de "sit", notificaciones en inglés)
 local TextChatService = game:GetService("TextChatService")
 local StarterGui = game:GetService("StarterGui")
 local Players = game:GetService("Players")
 
--- Tablas para control
 local pendingSitChecks = {}
 local cooldown = {}
 
--- Función para mostrar burbujas
+-- Show bubble over player's head
 local function showChatBubble(player, message)
     if not player or not player.Character then return end
-    
     wait(0.1)
-    
     local head = player.Character:FindFirstChild("Head")
     if not head then return end
-    
-    -- Limpiar burbuja anterior
+
     local oldBubble = head:FindFirstChild("ChatBubble")
     if oldBubble then oldBubble:Destroy() end
-    
-    -- Crear nueva burbuja
+
     local billboardGui = Instance.new("BillboardGui")
     billboardGui.Name = "ChatBubble"
     billboardGui.Adornee = head
@@ -29,7 +24,7 @@ local function showChatBubble(player, message)
     billboardGui.AlwaysOnTop = true
     billboardGui.MaxDistance = 100
     billboardGui.Parent = head
-    
+
     local textLabel = Instance.new("TextLabel")
     textLabel.Size = UDim2.new(1, 0, 1, 0)
     textLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -43,7 +38,7 @@ local function showChatBubble(player, message)
     textLabel.Text = message
     textLabel.TextWrapped = true
     textLabel.Parent = billboardGui
-    
+
     delay(5, function()
         if billboardGui and billboardGui.Parent then
             billboardGui:Destroy()
@@ -51,137 +46,136 @@ local function showChatBubble(player, message)
     end)
 end
 
--- Función para mostrar alerta de auto-sit
+-- Auto-sit alert (English)
 local function showAutoSitAlert(playerName, displayName)
     StarterGui:SetCore("SendNotification", {
-        Title = "🚨 AUTO-SIT DETECTADO",
-        Text = displayName .. " usa auto-sit",
+        Title = "AUTO-SIT DETECTED",
+        Text = displayName .. " may be using auto-sit",
         Icon = "rbxassetid://4458911881",
         Duration = 5
     })
-    
+
     StarterGui:SetCore("ChatMakeSystemMessage", {
-        Text = "🚨 " .. displayName .. " (@" .. playerName .. ") - AUTO-SIT DETECTADO",
+        Text = displayName .. " (@" .. playerName .. ") - AUTO-SIT DETECTED",
         Color = Color3.fromRGB(255, 50, 50),
         Font = Enum.Font.GothamBold,
         TextSize = 16
     })
 end
 
--- Función mejorada para detectar comandos /sit
-local function isSitCommand(message)
-    local lowerMessage = string.lower(string.gsub(message, "%s+", ""))
-    
-    -- Detectar varias formas del comando /sit
-    if string.sub(lowerMessage, 1, 4) == "/sit" then
-        return true
-    elseif string.sub(lowerMessage, 1, 7) == "/sentar" then
-        return true
-    elseif string.sub(lowerMessage, 1, 9) == "/sentarse" then
-        return true
+-- New detection: accept commands that END with the target (allows any prefix)
+local function isSitCommand(rawMessage)
+    if not rawMessage or rawMessage == "" then return false end
+
+    -- Remove leading non-alphanumeric characters (so "/1sit" -> "1sit")
+    local cleaned = rawMessage:gsub("^%W+", "")
+    -- Take first word only (in case they type "/1sit extra")
+    cleaned = cleaned:match("^[%w_]+") or ""
+    cleaned = string.lower(cleaned)
+
+    if cleaned == "" then return false end
+
+    local targets = {"sit", "sentar", "sentarse"}
+
+    for _, target in ipairs(targets) do
+        -- exact match
+        if cleaned == target then
+            return true
+        end
+        -- accept if the cleaned word ENDS with the target (any prefix allowed)
+        if #cleaned >= #target then
+            if cleaned:sub(-#target) == target then
+                return true
+            end
+        end
     end
-    
+
     return false
 end
 
--- Configurar detección para un jugador
+-- Setup detection per player (no prints)
 local function setupPlayerDetection(player)
     local humanoid = nil
     local connection = nil
-    
+
     local function onCharacterAdded(character)
-        -- Desconectar conexión anterior
         if connection then
             connection:Disconnect()
             connection = nil
         end
-        
-        -- Esperar a que el humanoid cargue
+
         wait(1)
         humanoid = character:FindFirstChildOfClass("Humanoid")
         if not humanoid then return end
-        
-        -- Conectar al cambio de estado Sit
+
         connection = humanoid:GetPropertyChangedSignal("Sit"):Connect(function()
             if humanoid.Sit then
-                -- Verificar cooldown
                 if cooldown[player] then return end
-                
-                -- Iniciar verificación de 2 segundos
+
                 pendingSitChecks[player] = true
-                print("⏰ Iniciando verificación para: " .. player.Name)
-                
+
                 delay(2, function()
-                    -- Después de 2 segundos, verificar si aún está pendiente
                     if pendingSitChecks[player] then
-                        -- No usó /sit en 2 segundos → AUTO-SIT
                         cooldown[player] = true
                         delay(10, function()
                             cooldown[player] = nil
                         end)
-                        
+
                         local displayName = player.DisplayName ~= player.Name and player.DisplayName or player.Name
                         showAutoSitAlert(player.Name, displayName)
-                        print("🚨 AUTO-SIT DETECTADO: " .. player.Name)
                     end
                     pendingSitChecks[player] = nil
                 end)
             end
         end)
     end
-    
-    -- Configurar para character actual
+
     if player.Character then
         onCharacterAdded(player.Character)
     end
-    
-    -- Conectar para nuevos characters
+
     player.CharacterAdded:Connect(onCharacterAdded)
 end
 
--- Detectar comandos de chat MEJORADO
+-- Handle when a player chats
 local function onPlayerChatted(player, message)
-    if message:sub(1, 1) == '/' then
+    if not message then return end
+
+    -- Consider messages that start with a non-alphanumeric (command-like) or are directly a word
+    if message:match("^%W") or message:match("^[%w_]") then
         showChatBubble(player, message)
-        print("💬 Chat detectado: " .. player.Name .. " -> " .. message)
-        
-        -- Detectar comando /sit MEJORADO
+
         if isSitCommand(message) then
-            -- Si hay una verificación pendiente, cancelarla
             if pendingSitChecks[player] then
                 pendingSitChecks[player] = nil
-                print("✅ Comando /sit legítimo detectado: " .. player.Name)
             end
         end
     end
 end
 
--- También monitorear el chat global para detectar mejor los comandos
+-- Monitor TextChatService
 TextChatService.OnIncomingMessage = function(message)
-    local text = message.Text
-    local player = Players:GetPlayerByUserId(message.TextSource.UserId)
-    
-    if text:sub(1, 1) == '/' then
-        StarterGui:SetCore("ChatMakeSystemMessage", {
-            Text = "💬 Comando detectado: " .. text,
-            Color = Color3.fromRGB(100, 200, 255)
-        })
-        
-        -- Detectar comando /sit también desde aquí
+    local text = message.Text or ""
+    local source = message.TextSource
+    local player = nil
+    if source and source.UserId then
+        player = Players:GetPlayerByUserId(source.UserId)
+    end
+
+    if text ~= "" then
         if player and isSitCommand(text) then
             if pendingSitChecks[player] then
                 pendingSitChecks[player] = nil
-                print("✅ Comando /sit detectado desde chat global: " .. player.Name)
             end
         end
-        
+
         local props = Instance.new("TextChatMessageProperties")
         props.Text = text
         return props
     end
 end
 
--- Configurar todos los jugadores
+-- Configure for existing players
 for _, player in pairs(Players:GetPlayers()) do
     player.Chatted:Connect(function(message)
         onPlayerChatted(player, message)
@@ -196,4 +190,8 @@ Players.PlayerAdded:Connect(function(player)
     setupPlayerDetection(player)
 end)
 
-print("✅ Spy completo activado - Detector de Auto-Sit MEJORADO")
+-- Ready message (chat system)
+StarterGui:SetCore("ChatMakeSystemMessage", {
+    Text = "Spy enabled - improved auto-sit detector (English notifications)",
+    Color = Color3.fromRGB(100, 200, 255)
+})
