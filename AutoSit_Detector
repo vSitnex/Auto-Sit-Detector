@@ -1,197 +1,227 @@
--- Spy Chat con Burbujas - Versión Final (acepta prefijos antes de "sit", notificaciones en inglés)
 local TextChatService = game:GetService("TextChatService")
 local StarterGui = game:GetService("StarterGui")
 local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 
 local pendingSitChecks = {}
 local cooldown = {}
+local lastSitCommandTime = {}
+local commandCount = {}
+local forcedCount = {}
+local lastUpdateTime = {}
+local forcedNotificationCooldown = {}
 
--- Show bubble over player's head
-local function showChatBubble(player, message)
+local COMMAND_WINDOW = 5
+local INDICATOR_DURATION = 5
+local FORCED_NOTIFICATION_COOLDOWN = 30
+local CIRCLE_SIZE = 18
+local BLUE_OFFSET = 5.8
+local RED_OFFSET = 6.2
+
+local function createOrUpdateIndicator(player, color, number)
     if not player or not player.Character then return end
-    wait(0.1)
+    local uid = player.UserId
     local head = player.Character:FindFirstChild("Head")
     if not head then return end
 
-    local oldBubble = head:FindFirstChild("ChatBubble")
-    if oldBubble then oldBubble:Destroy() end
+    local billboard = head:FindFirstChild("ActionIndicator")
+    if not billboard then
+        billboard = Instance.new("BillboardGui")
+        billboard.Name = "ActionIndicator"
+        billboard.Adornee = head
+        billboard.AlwaysOnTop = true
+        billboard.Size = UDim2.new(0, CIRCLE_SIZE, 0, CIRCLE_SIZE)
+        billboard.MaxDistance = math.huge
+        billboard.Parent = head
 
-    local billboardGui = Instance.new("BillboardGui")
-    billboardGui.Name = "ChatBubble"
-    billboardGui.Adornee = head
-    billboardGui.Size = UDim2.new(0, 200, 0, 60)
-    billboardGui.StudsOffset = Vector3.new(0, 2.5, 0)
-    billboardGui.AlwaysOnTop = true
-    billboardGui.MaxDistance = 100
-    billboardGui.Parent = head
+        local frame = Instance.new("Frame")
+        frame.Name = "CircleFrame"
+        frame.Size = UDim2.new(1,0,1,0)
+        frame.BorderSizePixel = 0
+        frame.Parent = billboard
 
-    local textLabel = Instance.new("TextLabel")
-    textLabel.Size = UDim2.new(1, 0, 1, 0)
-    textLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    textLabel.BackgroundTransparency = 0.3
-    textLabel.BorderSizePixel = 0
-    textLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
-    textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    textLabel.TextStrokeTransparency = 0
-    textLabel.Font = Enum.Font.GothamBold
-    textLabel.TextSize = 14
-    textLabel.Text = message
-    textLabel.TextWrapped = true
-    textLabel.Parent = billboardGui
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(1, 0)
+        corner.Parent = frame
 
-    delay(5, function()
-        if billboardGui and billboardGui.Parent then
-            billboardGui:Destroy()
+        local stroke = Instance.new("UIStroke")
+        stroke.Thickness = 2
+        stroke.Transparency = 0.15
+        stroke.Parent = frame
+
+        local txt = Instance.new("TextLabel")
+        txt.Name = "CountLabel"
+        txt.Size = UDim2.new(1,0,1,0)
+        txt.BackgroundTransparency = 1
+        txt.Font = Enum.Font.GothamBold
+        txt.TextSize = 14
+        txt.Parent = frame
+    end
+
+    local frame = billboard.CircleFrame
+    local txt = frame.CountLabel
+
+    if color == "blue" then
+        frame.BackgroundColor3 = Color3.fromRGB(100,180,255)
+        billboard.StudsOffset = Vector3.new(0, BLUE_OFFSET, 0)
+        txt.TextColor3 = Color3.fromRGB(20,30,40)
+    else
+        frame.BackgroundColor3 = Color3.fromRGB(255,80,80)
+        billboard.StudsOffset = Vector3.new(0, RED_OFFSET, 0)
+        txt.TextColor3 = Color3.fromRGB(255,255,255)
+    end
+
+    txt.Text = tostring(number or 1)
+
+    pcall(function()
+        local grow = TweenService:Create(billboard, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0,CIRCLE_SIZE+6,0,CIRCLE_SIZE+6)})
+        local shrink = TweenService:Create(billboard, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0,CIRCLE_SIZE,0,CIRCLE_SIZE)})
+        grow:Play()
+        grow.Completed:Wait()
+        task.wait(0.04)
+        shrink:Play()
+    end)
+
+    lastUpdateTime[uid] = tick()
+
+    task.spawn(function()
+        local myTime = lastUpdateTime[uid]
+        task.wait(INDICATOR_DURATION)
+        if lastUpdateTime[uid] == myTime then
+            if billboard and billboard.Parent then
+                billboard:Destroy()
+            end
+            commandCount[uid] = nil
+            forcedCount[uid] = nil
+            lastUpdateTime[uid] = nil
         end
     end)
 end
 
--- Auto-sit alert (English)
-local function showAutoSitAlert(playerName, displayName)
-    StarterGui:SetCore("SendNotification", {
-        Title = "AUTO-SIT DETECTED",
-        Text = displayName .. " may be using auto-sit",
-        Icon = "rbxassetid://4458911881",
-        Duration = 5
-    })
-
-    StarterGui:SetCore("ChatMakeSystemMessage", {
-        Text = displayName .. " (@" .. playerName .. ") - AUTO-SIT DETECTED",
-        Color = Color3.fromRGB(255, 50, 50),
-        Font = Enum.Font.GothamBold,
-        TextSize = 16
-    })
-end
-
--- New detection: accept commands that END with the target (allows any prefix)
 local function isSitCommand(rawMessage)
     if not rawMessage or rawMessage == "" then return false end
-
-    -- Remove leading non-alphanumeric characters (so "/1sit" -> "1sit")
     local cleaned = rawMessage:gsub("^%W+", "")
-    -- Take first word only (in case they type "/1sit extra")
     cleaned = cleaned:match("^[%w_]+") or ""
-    cleaned = string.lower(cleaned)
-
+    cleaned = cleaned:lower()
     if cleaned == "" then return false end
-
-    local targets = {"sit", "sentar", "sentarse"}
-
-    for _, target in ipairs(targets) do
-        -- exact match
-        if cleaned == target then
-            return true
-        end
-        -- accept if the cleaned word ENDS with the target (any prefix allowed)
-        if #cleaned >= #target then
-            if cleaned:sub(-#target) == target then
-                return true
-            end
-        end
+    local targets = {"sit","sentar","sentarse"}
+    for _, t in ipairs(targets) do
+        if cleaned == t then return true end
+        if #cleaned >= #t and cleaned:sub(-#t) == t then return true end
     end
-
     return false
 end
 
--- Setup detection per player (no prints)
 local function setupPlayerDetection(player)
-    local humanoid = nil
-    local connection = nil
+    local uid = player.UserId
+    local connection
 
     local function onCharacterAdded(character)
-        if connection then
-            connection:Disconnect()
-            connection = nil
-        end
-
-        wait(1)
-        humanoid = character:FindFirstChildOfClass("Humanoid")
+        if connection then connection:Disconnect() end
+        task.wait(1)
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
         if not humanoid then return end
 
         connection = humanoid:GetPropertyChangedSignal("Sit"):Connect(function()
             if humanoid.Sit then
-                if cooldown[player] then return end
+                local last = lastSitCommandTime[uid]
+                if last and (tick() - last) <= COMMAND_WINDOW then
+                    return
+                end
 
-                pendingSitChecks[player] = true
+                pendingSitChecks[uid] = true
 
-                delay(2, function()
-                    if pendingSitChecks[player] then
-                        cooldown[player] = true
-                        delay(10, function()
-                            cooldown[player] = nil
-                        end)
+                task.delay(2, function()
+                    if pendingSitChecks[uid] then
+                        pendingSitChecks[uid] = nil
+                        forcedCount[uid] = (forcedCount[uid] or 0) + 1
+                        createOrUpdateIndicator(player, "red", forcedCount[uid])
 
-                        local displayName = player.DisplayName ~= player.Name and player.DisplayName or player.Name
-                        showAutoSitAlert(player.Name, displayName)
+                        if not forcedNotificationCooldown[uid] then
+                            forcedNotificationCooldown[uid] = true
+                            pcall(function()
+                                local n = player.DisplayName ~= player.Name and player.DisplayName or player.Name
+                                StarterGui:SetCore("SendNotification", {Title="AUTO-SIT DETECTED", Text=n.." may be using auto-sit", Icon="rbxassetid://4458911881", Duration=5})
+                                StarterGui:SetCore("ChatMakeSystemMessage", {Text=n.." - AUTO-SIT DETECTED", Color=Color3.fromRGB(255,50,50), Font=Enum.Font.GothamBold, TextSize=16})
+                            end)
+                            task.delay(FORCED_NOTIFICATION_COOLDOWN, function()
+                                forcedNotificationCooldown[uid] = nil
+                            end)
+                        end
+
+                        if cooldown[uid] then return end
+                        cooldown[uid] = true
+                        task.delay(10, function() cooldown[uid] = nil end)
                     end
-                    pendingSitChecks[player] = nil
                 end)
             end
         end)
     end
 
-    if player.Character then
-        onCharacterAdded(player.Character)
-    end
-
+    if player.Character then onCharacterAdded(player.Character) end
     player.CharacterAdded:Connect(onCharacterAdded)
 end
 
--- Handle when a player chats
-local function onPlayerChatted(player, message)
-    if not message then return end
-
-    -- Consider messages that start with a non-alphanumeric (command-like) or are directly a word
-    if message:match("^%W") or message:match("^[%w_]") then
-        showChatBubble(player, message)
-
-        if isSitCommand(message) then
-            if pendingSitChecks[player] then
-                pendingSitChecks[player] = nil
-            end
+local function onPlayerChatted(player, msg)
+    local uid = player.UserId
+    if msg:sub(1,1) == "/" then
+        if isSitCommand(msg) then
+            lastSitCommandTime[uid] = tick()
+            commandCount[uid] = (commandCount[uid] or 0) + 1
+            createOrUpdateIndicator(player, "blue", commandCount[uid])
+        else
+            createOrUpdateIndicator(player, "blue", commandCount[uid] or 1)
         end
     end
 end
 
--- Monitor TextChatService
 TextChatService.OnIncomingMessage = function(message)
     local text = message.Text or ""
     local source = message.TextSource
-    local player = nil
-    if source and source.UserId then
-        player = Players:GetPlayerByUserId(source.UserId)
-    end
+    local p = source and Players:GetPlayerByUserId(source.UserId)
 
-    if text ~= "" then
-        if player and isSitCommand(text) then
-            if pendingSitChecks[player] then
-                pendingSitChecks[player] = nil
-            end
+    if p and text ~= "" then
+        if text:sub(1,1) == "/" and isSitCommand(text) then
+            lastSitCommandTime[p.UserId] = tick()
+            commandCount[p.UserId] = (commandCount[p.UserId] or 0) + 1
+            createOrUpdateIndicator(p, "blue", commandCount[p.UserId])
         end
-
-        local props = Instance.new("TextChatMessageProperties")
-        props.Text = text
-        return props
     end
+
+    local props = Instance.new("TextChatMessageProperties")
+    props.Text = text
+    return props
 end
 
--- Configure for existing players
-for _, player in pairs(Players:GetPlayers()) do
-    player.Chatted:Connect(function(message)
-        onPlayerChatted(player, message)
-    end)
-    setupPlayerDetection(player)
+for _, p in ipairs(Players:GetPlayers()) do
+    p.Chatted:Connect(function(m) onPlayerChatted(p, m) end)
+    setupPlayerDetection(p)
 end
 
-Players.PlayerAdded:Connect(function(player)
-    player.Chatted:Connect(function(message)
-        onPlayerChatted(player, message)
-    end)
-    setupPlayerDetection(player)
+Players.PlayerAdded:Connect(function(p)
+    p.Chatted:Connect(function(m) onPlayerChatted(p, m) end)
+    setupPlayerDetection(p)
 end)
 
--- Ready message (chat system)
+Players.PlayerRemoving:Connect(function(p)
+    local uid = p.UserId
+    pendingSitChecks[uid] = nil
+    cooldown[uid] = nil
+    lastSitCommandTime[uid] = nil
+    commandCount[uid] = nil
+    forcedCount[uid] = nil
+    lastUpdateTime[uid] = nil
+    forcedNotificationCooldown[uid] = nil
+    if p.Character then
+        local head = p.Character:FindFirstChild("Head")
+        if head then
+            local b = head:FindFirstChild("ActionIndicator")
+            if b then b:Destroy() end
+        end
+    end
+end)
+
 StarterGui:SetCore("ChatMakeSystemMessage", {
-    Text = "Spy enabled - improved auto-sit detector (English notifications)",
-    Color = Color3.fromRGB(100, 200, 255)
+    Text = "Spy enabled - indicador único con contador y cooldowns activos",
+    Color = Color3.fromRGB(100,200,255)
 })
